@@ -11,8 +11,8 @@
 		4455667788990011223344DD /* CatEntity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 334455667788990011223344 /* CatEntity.swift */; };
 		6677889900112233445566FF /* ScanRoomViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 556677889900112233445566 /* ScanRoomViewController.swift */; };
 		8899001122334455667788AA /* GameViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 778899001122334455667788 /* GameViewController.swift */; };
-		CC11223344556677889900DD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB11223344556677889900CC /* Assets.xcassets */; };
-		DD11223344556677889900EE /* cat.usdz in Resources */ = {isa = PBXBuildFile; fileRef = CC11223344556677889900DD /* cat.usdz */; };
+		EE11223344556677889900FF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB11223344556677889900CC /* Assets.xcassets */; };
+		FF11223344556677889900AA /* cat.usdz in Resources */ = {isa = PBXBuildFile; fileRef = CC11223344556677889900DD /* cat.usdz */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -125,8 +125,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CC11223344556677889900DD /* Assets.xcassets in Resources */,
-				DD11223344556677889900EE /* cat.usdz in Resources */,
+				EE11223344556677889900FF /* Assets.xcassets in Resources */,
+				FF11223344556677889900AA /* cat.usdz in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
