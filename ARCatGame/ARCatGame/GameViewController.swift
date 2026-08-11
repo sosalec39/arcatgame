@@ -12,7 +12,10 @@ final class GameViewController: UIViewController {
     private var score = 0 { didSet { updateScoreLabel() } }
     private var cats: [CatEntity] = []
     private var spawnTimer: Timer?
-    private var maxCats = 5
+    private let maxCats = 5
+    /// Detected vertical planes (walls). Cats must stay out of these.
+    private var wallPlanes: [ARPlaneAnchor] = []
+    private var hintLabel: UILabel!
 
     init(worldMap: ARWorldMap?) {
         self.savedWorldMap = worldMap
@@ -26,6 +29,7 @@ final class GameViewController: UIViewController {
         super.viewDidLoad()
         setupAR()
         setupHUD()
+        setupHint()
         setupGesture()
     }
 
@@ -52,8 +56,14 @@ final class GameViewController: UIViewController {
 
     private func startAR() {
         let cfg = ARWorldTrackingConfiguration()
-        cfg.planeDetection = [.horizontal]
+        // Vertical planes matter here: we need to know where walls are so we
+        // never place a cat inside one.
+        cfg.planeDetection = [.horizontal, .vertical]
         cfg.environmentTexturing = .automatic
+        // Keep the mesh from the scan phase — raycasts hit real geometry.
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            cfg.sceneReconstruction = .mesh
+        }
         var opts: ARSession.RunOptions = []
         if let map = savedWorldMap {
             cfg.initialWorldMap = map
@@ -118,6 +128,39 @@ final class GameViewController: UIViewController {
         }
     }
 
+    // MARK: - Hint
+
+    private func setupHint() {
+        hintLabel = UILabel()
+        hintLabel.text = "Наведите камеру на пол — котик появится"
+        hintLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        hintLabel.textColor = .white
+        hintLabel.textAlignment = .center
+        hintLabel.numberOfLines = 0
+        hintLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        hintLabel.layer.cornerRadius = 14
+        hintLabel.layer.masksToBounds = true
+        hintLabel.alpha = 0
+        hintLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(hintLabel)
+
+        NSLayoutConstraint.activate([
+            hintLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
+            hintLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
+            hintLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -28),
+            hintLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 46),
+        ])
+    }
+
+    private func setHint(_ text: String?) {
+        guard let text else {
+            UIView.animate(withDuration: 0.25) { self.hintLabel.alpha = 0 }
+            return
+        }
+        hintLabel.text = text
+        UIView.animate(withDuration: 0.25) { self.hintLabel.alpha = 1 }
+    }
+
     // MARK: - Gesture
 
     private func setupGesture() {
@@ -156,15 +199,15 @@ final class GameViewController: UIViewController {
     }
 
     private func spawnCat() async {
+        // Find a real surface first — no point loading a model we can't place.
+        guard let placement = findSpawnTransform() else {
+            setHint("Поводите камерой по полу — ищу место для котика")
+            return
+        }
         guard let cat = await CatEntity.makeCat() else { return }
+        setHint(nil)
 
-        // Place cat 1–2.5 m in front at a random horizontal offset, on the "floor"
-        let distance = Float.random(in: 1.0...2.5)
-        let angle    = Float.random(in: -.pi/3 ... .pi/3)
-        let x        = distance * sin(angle)
-        let z        = -distance * cos(angle)
-
-        let anchor = AnchorEntity(world: SIMD3<Float>(x, -0.3, z))
+        let anchor = AnchorEntity(world: placement)
         anchor.addChild(cat)
         arView.scene.addAnchor(anchor)
         cats.append(cat)
@@ -178,6 +221,87 @@ final class GameViewController: UIViewController {
         }
     }
 
+    /// Raycasts against detected horizontal surfaces and returns a transform
+    /// that sits on the floor, clear of walls and other cats.
+    /// Returns nil when nothing suitable is visible.
+    private func findSpawnTransform() -> simd_float4x4? {
+        let bounds = arView.bounds
+        // Sample the lower half of the screen — that's where the floor is.
+        // Try several random points and keep the first valid one.
+        for _ in 0..<25 {
+            let screenPoint = CGPoint(
+                x: CGFloat.random(in: bounds.minX + 40 ... bounds.maxX - 40),
+                y: CGFloat.random(in: bounds.midY ... bounds.maxY - 60)
+            )
+
+            // .existingPlaneGeometry respects the real extent of the detected
+            // plane, so a ray aimed past the floor's edge simply misses
+            // instead of landing on an infinite phantom plane.
+            let results = arView.raycast(
+                from: screenPoint,
+                allowing: .existingPlaneGeometry,
+                alignment: .horizontal
+            )
+            guard let hit = results.first else { continue }
+
+            let pos = SIMD3<Float>(hit.worldTransform.columns.3.x,
+                                   hit.worldTransform.columns.3.y,
+                                   hit.worldTransform.columns.3.z)
+
+            guard isPlayableDistance(pos), hasWallClearance(pos), isFreeOfCats(pos) else {
+                continue
+            }
+            return hit.worldTransform
+        }
+        return nil
+    }
+
+    /// Keeps cats reachable but not glued to the lens.
+    private func isPlayableDistance(_ pos: SIMD3<Float>) -> Bool {
+        guard let camera = arView.session.currentFrame?.camera else { return false }
+        let camPos = SIMD3<Float>(camera.transform.columns.3.x,
+                                  camera.transform.columns.3.y,
+                                  camera.transform.columns.3.z)
+        let d = simd_distance(pos, camPos)
+        return d > 0.7 && d < 3.5
+    }
+
+    /// Rejects points closer than 40 cm to any detected wall, measured
+    /// perpendicular to the wall and only within that wall's actual extent.
+    private func hasWallClearance(_ pos: SIMD3<Float>) -> Bool {
+        let minClearance: Float = 0.4
+
+        for wall in wallPlanes {
+            // Move the point into the plane's local space.
+            let inv = simd_inverse(wall.transform)
+            let local4 = inv * SIMD4<Float>(pos.x, pos.y, pos.z, 1)
+            let local = SIMD3<Float>(local4.x, local4.y, local4.z)
+
+            // For a vertical plane, local Y is the normal direction.
+            let perpendicular = abs(local.y)
+            guard perpendicular < minClearance else { continue }
+
+            // Only counts if the point is actually within the wall's bounds,
+            // not off past its edge.
+            let c = wall.center
+            let size = wall.planeSize
+            let halfWidth  = size.x / 2 + minClearance
+            let halfHeight = size.y / 2 + minClearance
+            if abs(local.x - c.x) < halfWidth && abs(local.z - c.z) < halfHeight {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Avoids stacking a new cat on top of an existing one.
+    private func isFreeOfCats(_ pos: SIMD3<Float>) -> Bool {
+        for cat in cats where !cat.isCaught {
+            if simd_distance(cat.position(relativeTo: nil), pos) < 0.5 { return false }
+        }
+        return true
+    }
+
     private func catchCat(_ cat: CatEntity) {
         score += 1
         showCatchEffect(at: cat.position(relativeTo: nil))
@@ -189,14 +313,19 @@ final class GameViewController: UIViewController {
     }
 
     private func runAwayCat(_ cat: CatEntity) {
-        // Move the cat quickly in a random direction, then remove
-        var flee = cat.transform
-        flee.translation.x += Float.random(in: -2...2)
-        flee.translation.z += Float.random(in: -2...2)
-        cat.move(to: flee, relativeTo: cat.parent, duration: 0.8, timingFunction: .easeIn)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) { [weak self, weak cat] in
+        // Don't slide the cat along a random vector — that was pushing it
+        // through walls. Just hop up and vanish, then respawn somewhere valid.
+        cat.isCaught = true   // stops bobbing and excludes it from the alive count
+
+        var away = cat.transform
+        away.translation.y += 0.12
+        away.scale = .zero
+        cat.move(to: away, relativeTo: cat.parent, duration: 0.45, timingFunction: .easeIn)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak cat] in
             cat?.parent?.removeFromParent()
             self?.cats.removeAll { $0 === cat }
+            self?.spawnCatIfNeeded()
         }
     }
 
@@ -233,15 +362,58 @@ final class GameViewController: UIViewController {
     }
 }
 
+// MARK: - Plane size compatibility
+
+private extension ARPlaneAnchor {
+    /// Plane dimensions as (width, height).
+    /// `planeExtent` is iOS 16+; fall back to the deprecated `extent` on iOS 15.
+    var planeSize: SIMD2<Float> {
+        if #available(iOS 16.0, *) {
+            return SIMD2<Float>(planeExtent.width, planeExtent.height)
+        } else {
+            return SIMD2<Float>(extent.x, extent.z)
+        }
+    }
+}
+
 // MARK: - ARSessionDelegate
 
 extension GameViewController: ARSessionDelegate {
+
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        // Spawn a cat near the first horizontal plane found
-        for anchor in anchors {
-            guard anchor is ARPlaneAnchor else { continue }
-            if cats.isEmpty { Task { await spawnCat() } }
-            break
+        var foundFloor = false
+
+        for case let plane as ARPlaneAnchor in anchors {
+            switch plane.alignment {
+            case .vertical:
+                wallPlanes.append(plane)
+            case .horizontal:
+                foundFloor = true
+            @unknown default:
+                break
+            }
         }
+
+        // First floor found: try to place the opening cat.
+        if foundFloor, cats.isEmpty {
+            Task { await spawnCat() }
+        }
+    }
+
+    /// Planes grow as ARKit learns the room — keep our wall list current,
+    /// otherwise clearance checks use stale extents.
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        for case let plane as ARPlaneAnchor in anchors where plane.alignment == .vertical {
+            if let i = wallPlanes.firstIndex(where: { $0.identifier == plane.identifier }) {
+                wallPlanes[i] = plane
+            } else {
+                wallPlanes.append(plane)
+            }
+        }
+    }
+
+    func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        let removed = Set(anchors.map(\.identifier))
+        wallPlanes.removeAll { removed.contains($0.identifier) }
     }
 }
