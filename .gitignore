@@ -1,0 +1,5 @@
+/Новый объект 2/
+*.zip
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
