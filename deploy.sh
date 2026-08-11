@@ -1,44 +1,46 @@
 #!/usr/bin/env bash
-# deploy.sh — download latest IPA from GitHub Actions and install via TrollStore SSH
-# Usage: bash deploy.sh [github_repo e.g. username/arcatgame]
+# deploy.sh — download latest IPA from GitHub Actions and install via TrollStore
+# Usage: bash deploy.sh [github_repo]   e.g. bash deploy.sh sosalec39/arcatgame
 set -e
 
-REPO="${1:-}"
+REPO="${1:-sosalec39/arcatgame}"
 PHONE_IP="192.168.1.168"
 PHONE_USER="mobile"
 PHONE_PASS="123"
 IPA_NAME="ARCatGame.ipa"
-REMOTE_PATH="/var/mobile/Documents/${IPA_NAME}"
+REMOTE_IPA="/var/mobile/Documents/${IPA_NAME}"
 
-# ── 1. Download IPA ──────────────────────────────────────────────────────────
-if [ -n "$REPO" ]; then
-  echo "⬇️  Downloading latest IPA from GitHub Actions (repo: $REPO)…"
-  # Requires 'gh' CLI: https://cli.github.com
-  RUN_ID=$(gh run list --repo "$REPO" --workflow build.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
+# SSH options that work with this device (password auth only, no pubkey)
+SSH_OPTS="-T -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o PreferredAuthentications=password"
+
+command -v sshpass >/dev/null || { echo "❌ sshpass required. Install it first."; exit 1; }
+
+# ── 1. Get the IPA ───────────────────────────────────────────────────────────
+if [ -n "$REPO" ] && command -v gh >/dev/null; then
+  echo "⬇️  Downloading latest successful build from $REPO…"
+  RUN_ID=$(gh run list --repo "$REPO" --workflow build.yml --status success \
+            --limit 1 --json databaseId -q '.[0].databaseId')
+  rm -f "$IPA_NAME"
   gh run download "$RUN_ID" --repo "$REPO" --name ARCatGame-ipa --dir .
-  echo "✅ Downloaded ${IPA_NAME}"
-else
-  echo "ℹ️  No repo specified — using local ${IPA_NAME}"
-  [ -f "$IPA_NAME" ] || { echo "❌ ${IPA_NAME} not found. Pass repo as first arg or place IPA here."; exit 1; }
 fi
+[ -f "$IPA_NAME" ] || { echo "❌ ${IPA_NAME} not found."; exit 1; }
+echo "✅ IPA ready ($(du -h "$IPA_NAME" | cut -f1))"
 
-# ── 2. Copy IPA to iPhone via SCP ────────────────────────────────────────────
-echo "📱 Copying IPA to iPhone at ${PHONE_IP}…"
-# sshpass lets us pass password non-interactively
-if ! command -v sshpass &>/dev/null; then
-  echo "⚠️  sshpass not found. Install: brew install sshpass (macOS) or apt install sshpass (Linux)"
-  echo "   Alternatively, set up SSH key auth: ssh-copy-id ${PHONE_USER}@${PHONE_IP}"
-  exit 1
-fi
+# ── 2. Copy to iPhone ────────────────────────────────────────────────────────
+# scp is rejected by this device's sshd, so stream the file over an ssh pipe.
+echo "📱 Copying to iPhone at ${PHONE_IP}…"
+sshpass -p "$PHONE_PASS" ssh $SSH_OPTS "${PHONE_USER}@${PHONE_IP}" \
+  "cat > ${REMOTE_IPA}" < "$IPA_NAME"
 
-sshpass -p "$PHONE_PASS" scp -o StrictHostKeyChecking=no \
-  "$IPA_NAME" "${PHONE_USER}@${PHONE_IP}:${REMOTE_PATH}"
-
-# ── 3. Install via TrollStore helper ─────────────────────────────────────────
-echo "🛠️  Installing via TrollStore on iPhone…"
-sshpass -p "$PHONE_PASS" ssh -o StrictHostKeyChecking=no \
-  "${PHONE_USER}@${PHONE_IP}" \
-  "trollstorehelper install '${REMOTE_PATH}' && rm -f '${REMOTE_PATH}'"
+# ── 3. Install with TrollStore ───────────────────────────────────────────────
+# trollstorehelper must run as root. jbctl has no rootexec, so use sudo -S.
+echo "🛠️  Installing via TrollStore…"
+printf '%s\n' "
+TROLL=\$(find /private/var/containers/Bundle/Application -name trollstorehelper 2>/dev/null | head -1)
+echo '${PHONE_PASS}' | sudo -S \"\$TROLL\" install ${REMOTE_IPA} 2>&1 | grep -E 'new app path|returning|ERROR' || true
+echo '${PHONE_PASS}' | sudo -S uicache -a >/dev/null 2>&1
+rm -f ${REMOTE_IPA}
+" | sshpass -p "$PHONE_PASS" ssh $SSH_OPTS "${PHONE_USER}@${PHONE_IP}"
 
 echo ""
-echo "🎉 ARCatGame installed! Open it on your iPhone."
+echo "🎉 ARCatGame installed. Look for the icon on your home screen."

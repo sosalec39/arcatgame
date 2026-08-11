@@ -36,14 +36,23 @@ ARCatGame/
 
 ```bash
 # Требует: sshpass, gh CLI
-bash deploy.sh ВАШ_ЛОГИН/ИМЯ_РЕПО
+bash deploy.sh sosalec39/arcatgame
 ```
 
-Или вручную:
-1. Скачайте `ARCatGame.ipa` из GitHub Actions
-2. Скопируйте на iPhone: `scp ARCatGame.ipa mobile@192.168.1.168:/var/mobile/Documents/`
-3. SSH на телефон: `ssh mobile@192.168.1.168`
-4. Установите: `trollstorehelper install /var/mobile/Documents/ARCatGame.ipa`
+Скрипт сам скачает свежий IPA из Actions, закинет на телефон и установит.
+
+### Особенности этого устройства
+
+Пара вещей, на которые я наткнулся при установке:
+
+- **`scp` не работает** — sshd на телефоне его отклоняет. Файл передаётся
+  через пайп: `ssh mobile@IP "cat > /path" < file.ipa`
+- **`trollstorehelper` требует root.** У Dopamine нет `jbctl rootexec`
+  (там только `proc_set_debugged`, `trustcache`, `update`), поэтому нужен
+  `echo 123 | sudo -S trollstorehelper install ...`
+- **SSH только по паролю** — нужны флаги
+  `-o PubkeyAuthentication=no -o PreferredAuthentications=password`,
+  иначе получите `Too many authentication failures`
 
 ## Требования
 
